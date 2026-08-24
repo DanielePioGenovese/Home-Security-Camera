@@ -18,7 +18,7 @@ class ApiService {
         .post(Uri.parse('$baseUrl/api/camera/on'))
         .timeout(_timeout);
     if (response.statusCode != 200) {
-      throw Exception('Errore nell\'accensione della camera');
+      throw Exception('Error loading camera');
     }
   }
 
@@ -166,7 +166,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Home Security Camera',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color.fromARGB(255, 40, 40, 40)),
         useMaterial3: true,
       ),
       home: const CameraHomePage(title: 'Home Security Camera'),
@@ -228,13 +228,13 @@ class _CameraHomePageState extends State<CameraHomePage> {
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.start,
           children: [
-            Expanded(
+            AspectRatio(
+              aspectRatio: 4 / 3, // deve combaciare con FRAME_WIDTH/FRAME_HEIGHT in camera.py
               child: Container(
-                width: double.infinity,
                 decoration: BoxDecoration(
-                  color: Colors.black,
+                  color: const Color.fromARGB(255, 0, 0, 0),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Colors.deepPurple, width: 2),
                 ),
