@@ -9,7 +9,7 @@ void main() {
 }
 
 class ApiService {
-  final String baseUrl = "http://192.168.178.50:5000";
+  final String baseUrl = "http://192.168.178.69:5000";
 
   static const _timeout = Duration(seconds: 10);
 
@@ -279,11 +279,12 @@ class _CameraHomePageState extends State<CameraHomePage> {
                 ),
               ],
             ),
-            Image.asset(
-              'assets/icon/icon.png',
-              width: 300.0,             
-              height: 300.0,
-            )
+            if (_isOn)
+              Image.asset(
+                'assets/icon/icon.png',
+                width: 300.0,
+                height: 300.0,
+              ),
           ],
         ),
       ),

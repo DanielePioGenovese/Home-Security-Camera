@@ -2,6 +2,7 @@
 # dependencies = [
 #   "flask",
 #   "opencv-python",
+#   "ultralytics",
 # ]
 # ///
 """
@@ -29,8 +30,17 @@ import time
 
 import cv2
 from flask import Flask, Response, jsonify, render_template_string
+from ultralytics import YOLO
 
 app = Flask(__name__)
+
+# Loaded once at startup (a few seconds) so per-frame inference is fast.
+YOLO_MODEL = YOLO("yolo26n.pt")
+
+# Fraction of the frame that must be "moving" (per background subtraction)
+# before YOLO runs on it. Running YOLO on every single frame would be far
+# too slow for a live stream; gating on motion keeps idle frames cheap.
+MOTION_THRESHOLD = 0.01
 
 # Which camera to use. Either:
 #   - an integer index: 0, 1, 2, ...
@@ -135,6 +145,7 @@ class CameraStream:
         self.frame_id = 0  # increments on every new frame captured
         self.running = False
         self.thread = None
+        self.backsub = None  # (re)created in start(), used for motion gating
 
     def start(self, timeout=5.0):
         """Open the camera if it isn't already running. Blocks until the
@@ -149,6 +160,9 @@ class CameraStream:
             self.latest_frame = None
             self.frame_id = 0
             self.running = True
+            self.backsub = cv2.createBackgroundSubtractorMOG2(
+                history=500, varThreshold=16, detectShadows=True
+            )
 
             ready = threading.Event()
             self.thread = threading.Thread(
@@ -232,6 +246,23 @@ camera_stream = CameraStream(CAMERA_SOURCE)
 encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
 
+def annotate_with_yolo(frame):
+    """Draw person bounding boxes on the frame, but only run YOLO when
+    background subtraction shows enough of the frame is moving."""
+    mask = camera_stream.backsub.apply(frame)
+    _, mask_clean = cv2.threshold(mask, 250, 255, cv2.THRESH_BINARY)
+    total_pixels = mask_clean.shape[0] * mask_clean.shape[1]
+    motion_ratio = cv2.countNonZero(mask_clean) / total_pixels
+
+    if motion_ratio <= MOTION_THRESHOLD:
+        return frame
+
+    result = YOLO_MODEL(frame, classes=[0], verbose=False)[0]
+    if result.boxes is not None and len(result.boxes) > 0:
+        return result.plot()
+    return frame
+
+
 def generate_frames():
     last_seen_id = 0
     min_interval = 1.0 / MAX_FPS
@@ -244,6 +275,8 @@ def generate_frames():
         if frame is None:
             time.sleep(0.005)  # no new frame yet, wait briefly
             continue
+
+        frame = annotate_with_yolo(frame)
 
         ok, buffer = cv2.imencode(".jpg", frame, encode_params)
         if not ok:
