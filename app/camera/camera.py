@@ -120,20 +120,64 @@ def open_capture(source):
 
 
 class CameraStream:
-    """Opens the camera and keeps only the newest frame, in a background thread."""
+    """Opens the camera on demand and keeps only the newest frame, in a
+    background thread. The device is only held open between start() and
+    stop(), so the camera (and its LED) is truly off until requested."""
 
     def __init__(self, source):
         self.requested_source = source
         self.active_source = None
         self.error = None
 
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # protects latest_frame / frame_id
+        self.state_lock = threading.Lock()  # protects start/stop transitions
         self.latest_frame = None
         self.frame_id = 0  # increments on every new frame captured
-        self.running = True
+        self.running = False
+        self.thread = None
 
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
+    def start(self, timeout=5.0):
+        """Open the camera if it isn't already running. Blocks until the
+        camera is confirmed open (or failed) so the caller gets an accurate
+        result. Returns True on success."""
+        with self.state_lock:
+            if self.running:
+                return True
+
+            self.error = None
+            self.active_source = None
+            self.latest_frame = None
+            self.frame_id = 0
+            self.running = True
+
+            ready = threading.Event()
+            self.thread = threading.Thread(
+                target=self._run, args=(ready,), daemon=True
+            )
+            self.thread.start()
+            ready.wait(timeout)
+
+            if self.error or self.active_source is None:
+                self.running = False
+                self.thread.join(timeout=2)
+                self.thread = None
+                if self.error is None:
+                    self.error = "Timed out opening the camera."
+                return False
+            return True
+
+    def stop(self):
+        """Stop capturing and release the device."""
+        with self.state_lock:
+            if not self.running:
+                return
+            self.running = False
+            if self.thread:
+                self.thread.join(timeout=2)
+            self.thread = None
+            self.active_source = None
+            self.latest_frame = None
+            self.frame_id = 0
 
     def _acquire(self):
         """Open the requested camera, or auto-detect a working one."""
@@ -157,10 +201,12 @@ class CameraStream:
         self.error = "No working camera found. Check permissions or connections."
         return None
 
-    def _run(self):
+    def _run(self, ready):
         capture = self._acquire()
         if capture is None:
+            ready.set()
             return
+        ready.set()
 
         try:
             while self.running:
@@ -181,10 +227,6 @@ class CameraStream:
                 return None, last_seen_id
             return self.latest_frame.copy(), self.frame_id
 
-    def stop(self):
-        self.running = False
-        self.thread.join(timeout=2)
-
 
 camera_stream = CameraStream(CAMERA_SOURCE)
 encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
@@ -195,8 +237,8 @@ def generate_frames():
     min_interval = 1.0 / MAX_FPS
 
     while True:
-        if camera_stream.error:
-            return  # camera failed; /status explains why on the page
+        if not camera_stream.running or camera_stream.error:
+            return  # camera off or failed; /status explains why on the page
 
         frame, last_seen_id = camera_stream.get_frame_if_newer(last_seen_id)
         if frame is None:
@@ -222,11 +264,13 @@ def index():
 
 @app.route("/status")
 def status():
+    if not camera_stream.running:
+        return jsonify(ok=False, error="Camera is off", state="off")
     if camera_stream.error:
-        return jsonify(ok=False, error=camera_stream.error)
+        return jsonify(ok=False, error=camera_stream.error, state="error")
     if camera_stream.active_source is None:
-        return jsonify(ok=False, error="Opening camera...")
-    return jsonify(ok=True, source=str(camera_stream.active_source))
+        return jsonify(ok=False, error="Opening camera...", state="starting")
+    return jsonify(ok=True, source=str(camera_stream.active_source), state="on")
 
 
 @app.route("/video_feed")
@@ -236,6 +280,16 @@ def video_feed():
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
+@app.route('/api/camera/on', methods=['POST'])
+def camera_on():
+    if camera_stream.start():
+        return jsonify({"status": "on", "source": str(camera_stream.active_source)}), 200
+    return jsonify({"status": "error", "error": camera_stream.error}), 500
+
+@app.route('/api/camera/off', methods=['POST'])
+def camera_off():
+    camera_stream.stop()
+    return jsonify({"status": "off"}), 200
 
 if __name__ == "__main__":
     try:
