@@ -270,7 +270,7 @@ class _CameraHomePageState extends State<CameraHomePage> {
                 const SizedBox(width: 24),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
+                    backgroundColor: const Color.fromARGB(255, 239, 28, 12),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
                   ),
@@ -279,6 +279,11 @@ class _CameraHomePageState extends State<CameraHomePage> {
                 ),
               ],
             ),
+            Image.asset(
+              'assets/icon/icon.png',
+              width: 300.0,             
+              height: 300.0,
+            )
           ],
         ),
       ),
