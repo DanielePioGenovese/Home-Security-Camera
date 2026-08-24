@@ -29,7 +29,7 @@ import threading
 import time
 
 import cv2
-from flask import Flask, Response, jsonify, render_template_string
+from flask import Flask, Response, jsonify
 from ultralytics import YOLO
 
 app = Flask(__name__)
@@ -60,53 +60,6 @@ FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 JPEG_QUALITY = 80  # 0-100, lower = faster encode, smaller frames
 MAX_FPS = 30  # upper bound on frames sent to the browser
-
-PAGE_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <title>Webcam Live Stream</title>
-    <style>
-        body {
-            background: #111;
-            color: #eee;
-            font-family: sans-serif;
-            text-align: center;
-            padding-top: 40px;
-        }
-        img {
-            border: 4px solid #333;
-            border-radius: 8px;
-            max-width: 90%;
-        }
-        #status { color: #f5a; margin-top: 16px; min-height: 1.2em; }
-    </style>
-</head>
-<body>
-    <h1>Webcam Stream</h1>
-    <img src="{{ url_for('video_feed') }}" alt="camera stream">
-    <div id="status">Connecting to camera...</div>
-    <script>
-        // Poll the status endpoint so a camera failure shows up on the page
-        // instead of just leaving a broken image with no explanation.
-        async function checkStatus() {
-            try {
-                const res = await fetch('/status');
-                const data = await res.json();
-                document.getElementById('status').textContent =
-                    data.ok ? 'Live - camera: ' + data.source : 'ERROR: ' + data.error;
-            } catch (e) {
-                document.getElementById('status').textContent = 'Cannot reach server';
-            }
-        }
-        checkStatus();
-        setInterval(checkStatus, 3000);
-    </script>
-</body>
-</html>
-"""
-
 
 def open_capture(source):
     """Open a VideoCapture and verify it actually delivers a frame."""
@@ -146,6 +99,7 @@ class CameraStream:
         self.running = False
         self.thread = None
         self.backsub = None  # (re)created in start(), used for motion gating
+        self.person_detected = False
 
     def start(self, timeout=5.0):
         """Open the camera if it isn't already running. Blocks until the
@@ -255,10 +209,15 @@ def annotate_with_yolo(frame):
     motion_ratio = cv2.countNonZero(mask_clean) / total_pixels
 
     if motion_ratio <= MOTION_THRESHOLD:
+        camera_stream.person_detected = False
         return frame
 
     result = YOLO_MODEL(frame, classes=[0], verbose=False)[0]
-    if result.boxes is not None and len(result.boxes) > 0:
+    found = result.boxes is not None and len(result.boxes) > 0
+
+    with camera_stream.lock:
+        camera_stream.person_detected = found
+    if found:
         return result.plot()
     return frame
 
@@ -290,11 +249,6 @@ def generate_frames():
         time.sleep(min_interval)
 
 
-@app.route("/")
-def index():
-    return render_template_string(PAGE_HTML)
-
-
 @app.route("/status")
 def status():
     if not camera_stream.running:
@@ -303,7 +257,7 @@ def status():
         return jsonify(ok=False, error=camera_stream.error, state="error")
     if camera_stream.active_source is None:
         return jsonify(ok=False, error="Opening camera...", state="starting")
-    return jsonify(ok=True, source=str(camera_stream.active_source), state="on")
+    return jsonify(ok=True, source=str(camera_stream.active_source), state="on", person_detected=camera_stream.person_detected)
 
 
 @app.route("/video_feed")

@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
@@ -27,8 +29,15 @@ class ApiService {
         .post(Uri.parse('$baseUrl/api/camera/off'))
         .timeout(_timeout);
     if (response.statusCode != 200) {
-      throw Exception('Errore nello spegnimento della camera');
+      throw Exception('Error turning off camera');
     }
+  }
+
+  Future<bool> isPersonDetected() async {
+    final response =
+        await http.get(Uri.parse('$baseUrl/status')).timeout(_timeout);
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return data['person_detected'] == true;
   }
 }
 
@@ -75,12 +84,12 @@ class _MjpegViewState extends State<MjpegView> {
       final request = http.Request('GET', Uri.parse(widget.streamUrl));
       final response = await _client!.send(request);
       if (response.statusCode != 200) {
-        throw Exception('Stream non disponibile (${response.statusCode})');
+        throw Exception('Stream unavailable (${response.statusCode})');
       }
       _subscription = response.stream.listen(
         _onChunk,
         onError: (Object e) => _setError(e.toString()),
-        onDone: () => _setError('Connessione al video terminata'),
+        onDone: () => _setError('Video connection closed'),
         cancelOnError: true,
       );
     } catch (e) {
@@ -186,13 +195,83 @@ class CameraHomePage extends StatefulWidget {
 class _CameraHomePageState extends State<CameraHomePage> {
   bool _isOn = false;
   bool _isLoading = false;
+  bool _personDetected = false;
   final ApiService _apiService = ApiService();
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+
+  Timer? _detectionTimer;
+  bool _wasPersonDetected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initNotifications();
+  }
+
+  Future<void> _initNotifications() async {
+    await _notifications.initialize(
+      settings: const InitializationSettings(
+        android: AndroidInitializationSettings('ic_notification'),
+      ),
+    );
+    // Android 13+ requires the permission at runtime, otherwise the
+    // notification silently never shows up.
+    await _notifications
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+  }
+
+  void _startDetectionPolling() {
+    _detectionTimer?.cancel();
+    _wasPersonDetected = false;
+    _detectionTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      try {
+        final detected = await _apiService.isPersonDetected();
+        if (!mounted) return;
+        setState(() => _personDetected = detected);
+        if (detected && !_wasPersonDetected) {
+          _showPersonNotification(); // only on the rising edge
+        }
+        _wasPersonDetected = detected;
+      } catch (_) {
+        // A single failed poll isn't worth surfacing to the user;
+        // the next tick will retry.
+      }
+    });
+  }
+
+  void _stopDetectionPolling() {
+    _detectionTimer?.cancel();
+    _detectionTimer = null;
+    _personDetected = false;
+    _wasPersonDetected = false;
+  }
+
+  Future<void> _showPersonNotification() async {
+    await _notifications.show(
+      id: 0,
+      title: 'Motion detected',
+      body: 'A person was detected in front of the camera',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'camera_alerts',
+          'Camera alerts',
+          icon: 'ic_notification',
+          priority: Priority.high,
+          importance: Importance.high,
+        ),
+      ),
+    );
+  }
 
   Future<void> _turnOn() async {
       setState(() => _isLoading = true);
       try {
         await _apiService.turnOnCamera();
         setState(() => _isOn = true);
+        _startDetectionPolling();
       } catch (e) {
         _showError(e.toString());
       } finally {
@@ -205,6 +284,7 @@ class _CameraHomePageState extends State<CameraHomePage> {
       try {
         await _apiService.turnOffCamera();
         setState(() => _isOn = false);
+        _stopDetectionPolling();
       } catch (e) {
         _showError(e.toString());
       } finally {
@@ -216,6 +296,12 @@ class _CameraHomePageState extends State<CameraHomePage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.red),
     );
+  }
+
+  @override
+  void dispose() {
+    _detectionTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -231,7 +317,7 @@ class _CameraHomePageState extends State<CameraHomePage> {
           mainAxisAlignment: MainAxisAlignment.start,
           children: [
             AspectRatio(
-              aspectRatio: 4 / 3, // deve combaciare con FRAME_WIDTH/FRAME_HEIGHT in camera.py
+              aspectRatio: 4 / 3, // must match FRAME_WIDTH/FRAME_HEIGHT in camera.py
               child: Container(
                 decoration: BoxDecoration(
                   color: const Color.fromARGB(255, 0, 0, 0),
@@ -279,11 +365,14 @@ class _CameraHomePageState extends State<CameraHomePage> {
                 ),
               ],
             ),
-            if (_isOn)
-              Image.asset(
-                'assets/icon/icon.png',
-                width: 300.0,
-                height: 300.0,
+            if (_personDetected)
+              Padding(
+                padding: const EdgeInsets.only(top: 16.0),
+                child: Image.asset(
+                  'assets/icon/icon.png',
+                  width: 80.0,
+                  height: 80.0,
+                ),
               ),
           ],
         ),
