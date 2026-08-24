@@ -2,11 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   runApp(const MyApp());
 }
 
@@ -33,11 +37,14 @@ class ApiService {
     }
   }
 
-  Future<bool> isPersonDetected() async {
-    final response =
-        await http.get(Uri.parse('$baseUrl/status')).timeout(_timeout);
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    return data['person_detected'] == true;
+  Future<void> registerToken(String token) async {
+    await http
+        .post(
+          Uri.parse('$baseUrl/api/register_token'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'token': token}),
+        )
+        .timeout(_timeout);
   }
 }
 
@@ -200,13 +207,13 @@ class _CameraHomePageState extends State<CameraHomePage> {
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
 
-  Timer? _detectionTimer;
-  bool _wasPersonDetected = false;
+  Timer? _detectionIndicatorTimer;
 
   @override
   void initState() {
     super.initState();
     _initNotifications();
+    _initPushNotifications();
   }
 
   Future<void> _initNotifications() async {
@@ -223,30 +230,38 @@ class _CameraHomePageState extends State<CameraHomePage> {
         ?.requestNotificationsPermission();
   }
 
-  void _startDetectionPolling() {
-    _detectionTimer?.cancel();
-    _wasPersonDetected = false;
-    _detectionTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      try {
-        final detected = await _apiService.isPersonDetected();
-        if (!mounted) return;
-        setState(() => _personDetected = detected);
-        if (detected && !_wasPersonDetected) {
-          _showPersonNotification(); // only on the rising edge
-        }
-        _wasPersonDetected = detected;
-      } catch (_) {
-        // A single failed poll isn't worth surfacing to the user;
-        // the next tick will retry.
-      }
+  // Registers this phone with the server so it knows where to push
+  // detections, and listens for pushes that arrive while the app is open.
+  // Detection now flows server -> phone via FCM instead of the app polling
+  // the server, so notifications keep working even when the app is
+  // backgrounded or fully closed.
+  Future<void> _initPushNotifications() async {
+    await FirebaseMessaging.instance.requestPermission();
+
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token != null) {
+      await _apiService.registerToken(token);
+    }
+    // The token can change (e.g. app reinstall); keep the server in sync.
+    FirebaseMessaging.instance.onTokenRefresh.listen(_apiService.registerToken);
+
+    // Android does not show FCM notifications on its own while the app is
+    // in the foreground, so this shows one manually in that case; when the
+    // app is backgrounded or closed, Google Play Services displays it
+    // without any of this code running.
+    FirebaseMessaging.onMessage.listen((message) {
+      _showPersonNotification();
+      _flashDetectionIndicator();
     });
   }
 
-  void _stopDetectionPolling() {
-    _detectionTimer?.cancel();
-    _detectionTimer = null;
-    _personDetected = false;
-    _wasPersonDetected = false;
+  void _flashDetectionIndicator() {
+    if (!mounted) return;
+    setState(() => _personDetected = true);
+    _detectionIndicatorTimer?.cancel();
+    _detectionIndicatorTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _personDetected = false);
+    });
   }
 
   Future<void> _showPersonNotification() async {
@@ -271,7 +286,6 @@ class _CameraHomePageState extends State<CameraHomePage> {
       try {
         await _apiService.turnOnCamera();
         setState(() => _isOn = true);
-        _startDetectionPolling();
       } catch (e) {
         _showError(e.toString());
       } finally {
@@ -280,13 +294,21 @@ class _CameraHomePageState extends State<CameraHomePage> {
     }
 
   Future<void> _turnOff() async {
-      setState(() => _isLoading = true);
+      // Unmount MjpegView (and close its stream) before the network call,
+      // not after: the server closes /video_feed as soon as it receives
+      // this request, and if our stream is still actively being read at
+      // that point, dart:io reports the resulting closed connection as a
+      // ClientException instead of a normal end-of-stream. Disconnecting
+      // client-side first avoids that race entirely.
+      setState(() {
+        _isLoading = true;
+        _isOn = false;
+      });
       try {
         await _apiService.turnOffCamera();
-        setState(() => _isOn = false);
-        _stopDetectionPolling();
       } catch (e) {
         _showError(e.toString());
+        setState(() => _isOn = true);
       } finally {
         setState(() => _isLoading = false);
       }
@@ -300,7 +322,7 @@ class _CameraHomePageState extends State<CameraHomePage> {
 
   @override
   void dispose() {
-    _detectionTimer?.cancel();
+    _detectionIndicatorTimer?.cancel();
     super.dispose();
   }
 

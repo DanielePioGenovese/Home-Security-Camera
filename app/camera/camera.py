@@ -3,6 +3,7 @@
 #   "flask",
 #   "opencv-python",
 #   "ultralytics",
+#   "firebase-admin",
 # ]
 # ///
 """
@@ -29,13 +30,27 @@ import threading
 import time
 
 import cv2
-from flask import Flask, Response, jsonify
+import firebase_admin
+from firebase_admin import credentials, messaging
+from flask import Flask, Response, jsonify, request
 from ultralytics import YOLO
 
 app = Flask(__name__)
 
 # Loaded once at startup (a few seconds) so per-frame inference is fast.
 YOLO_MODEL = YOLO("yolo26n.pt")
+
+# Lets this server authenticate as a project admin and send push
+# notifications directly to a phone via Firebase Cloud Messaging, without
+# the phone having to ask the server for anything.
+firebase_admin.initialize_app(
+    credentials.Certificate("firebase-service-account.json")
+)
+
+# The FCM registration token of the phone to notify. A single global is
+# enough for a single-device home setup; registered via /api/register_token.
+device_token = None
+device_token_lock = threading.Lock()
 
 # Fraction of the frame that must be "moving" (per background subtraction)
 # before YOLO runs on it. Running YOLO on every single frame would be far
@@ -200,6 +215,28 @@ camera_stream = CameraStream(CAMERA_SOURCE)
 encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
 
+def send_person_detected_push():
+    """Push a notification straight to the registered phone via FCM. This
+    reaches the phone even if the app is backgrounded or fully closed,
+    because delivery is handled by Google Play Services, not by the app."""
+    with device_token_lock:
+        token = device_token
+    if token is None:
+        return
+
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="Motion detected",
+            body="A person was detected in front of the camera",
+        ),
+        token=token,
+    )
+    try:
+        messaging.send(message)
+    except Exception as e:
+        print(f"Failed to send push notification: {e}")
+
+
 def annotate_with_yolo(frame):
     """Draw person bounding boxes on the frame, but only run YOLO when
     background subtraction shows enough of the frame is moving."""
@@ -209,14 +246,20 @@ def annotate_with_yolo(frame):
     motion_ratio = cv2.countNonZero(mask_clean) / total_pixels
 
     if motion_ratio <= MOTION_THRESHOLD:
-        camera_stream.person_detected = False
+        with camera_stream.lock:
+            camera_stream.person_detected = False
         return frame
 
     result = YOLO_MODEL(frame, classes=[0], verbose=False)[0]
     found = result.boxes is not None and len(result.boxes) > 0
 
     with camera_stream.lock:
+        was_detected = camera_stream.person_detected
         camera_stream.person_detected = found
+
+    if found and not was_detected:
+        send_person_detected_push()  # only on the rising edge, not every frame
+
     if found:
         return result.plot()
     return frame
@@ -277,6 +320,17 @@ def camera_on():
 def camera_off():
     camera_stream.stop()
     return jsonify({"status": "off"}), 200
+
+@app.route('/api/register_token', methods=['POST'])
+def register_token():
+    global device_token
+    data = request.get_json(silent=True) or {}
+    token = data.get('token')
+    if not token:
+        return jsonify({"error": "Missing 'token' field"}), 400
+    with device_token_lock:
+        device_token = token
+    return jsonify({"status": "registered"}), 200
 
 if __name__ == "__main__":
     try:

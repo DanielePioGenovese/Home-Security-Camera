@@ -243,3 +243,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+home-security-key.json
+app/camera/firebase-service-account.json
+app/mobile_app/android/app/google-services.json
