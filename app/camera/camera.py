@@ -236,6 +236,9 @@ def send_person_detected_push():
             title="Motion detected",
             body="A person was detected in front of the camera",
         ),
+        android=messaging.AndroidConfig(
+            priority='high',
+        ),
         token=token,
     )
     try:

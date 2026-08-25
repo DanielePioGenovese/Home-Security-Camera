@@ -46,7 +46,22 @@ class ApiService {
         )
         .timeout(_timeout);
   }
+
+  Future<String> cameraStatus() async {
+
+    final response = await http
+    .get(
+      Uri.parse('$baseUrl/status'),
+    )
+    .timeout(_timeout);
+
+    String camStatus = json.decode(response.body)['state'];
+
+    return camStatus;
+
+    }
 }
+
 
 /// Displays a `multipart/x-mixed-replace` MJPEG stream by scanning the raw
 /// byte stream for JPEG start/end markers (FFD8...FFD9), since Flutter's
@@ -216,6 +231,7 @@ class _CameraHomePageState extends State<CameraHomePage> {
     super.initState();
     _initNotifications();
     _initPushNotifications();
+    _initCameraStatus();
   }
 
   Future<void> _initNotifications() async {
@@ -255,6 +271,14 @@ class _CameraHomePageState extends State<CameraHomePage> {
       _showPersonNotification();
       _flashDetectionIndicator();
     });
+  }
+
+  Future<void> _initCameraStatus() async {
+    String cameraStatus = await _apiService.cameraStatus();
+
+    if (cameraStatus == 'on'){
+      setState(() => _isOn = true);
+    }
   }
 
   void _flashDetectionIndicator() {
