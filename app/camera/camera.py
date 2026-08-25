@@ -7,27 +7,36 @@
 # ]
 # ///
 """
-Low-latency webcam streaming to a web page using Flask + OpenCV.
+Home surveillance server: low-latency MJPEG streaming plus person detection.
 
-Fixes over the naive version:
-  1. Latency: a background thread keeps ONLY the latest frame, so old frames
-     are dropped instead of queuing up and arriving late in the browser.
-  2. Wasted bandwidth: the HTTP generator sends a frame only when a NEW one
-     is available, and is capped at MAX_FPS. Otherwise it would re-send the
-     same frame hundreds of times per second and saturate the connection.
-  3. Startup crash: the camera is opened lazily, in the background. If it
-     can't be opened, the web server still starts and the page shows a clear
-     error instead of the whole app failing to boot.
+A background thread owns the camera and is the single source of truth for the
+whole system. It keeps only the latest frame (old frames are dropped rather
+than queued, which is what causes lag) and runs person detection on every
+frame it captures - not on every frame a client requests. Detection therefore
+keeps working with no phone connected, which is the whole point of a
+surveillance system: the phone is a remote control, not a dependency.
 
-Run with uv (inline deps above are used, no manual venv/install needed):
-    uv run webcam_stream.py
+Detection is gated on background subtraction: YOLO only runs once enough of
+the frame is moving, so idle frames cost almost nothing. On the rising edge
+of a detection (no person -> person) a push notification is sent through
+Firebase Cloud Messaging, which reaches the phone even when the app is closed.
 
-Then open in your browser:
-    http://localhost:5000
+Security model: the server binds the Tailscale interface only, so it is
+unreachable from the local Wi-Fi and never exposed to the internet, and every
+endpoint requires a shared secret in the X-API-Key header.
+
+Run with uv (the inline dependencies above are resolved automatically):
+    CAMERA_API_KEY=<secret> uv run camera.py
 """
 
+import hmac
+import json
+import os
+import subprocess
 import threading
 import time
+from functools import wraps
+from pathlib import Path
 
 import cv2
 import firebase_admin
@@ -47,10 +56,53 @@ firebase_admin.initialize_app(
     credentials.Certificate("firebase-service-account.json")
 )
 
+# Shared secret every request must present in the X-API-Key header. Read
+# from the environment so it never ends up in the source or in git. There is
+# deliberately no default: a surveillance server that silently starts with no
+# authentication is worse than one that refuses to start.
+API_KEY = os.environ.get("CAMERA_API_KEY")
+if not API_KEY:
+    raise SystemExit(
+        "CAMERA_API_KEY is not set. Generate one with:\n"
+        "    python3 -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
+        "then export it before running this server."
+    )
+
 # The FCM registration token of the phone to notify. A single global is
 # enough for a single-device home setup; registered via /api/register_token.
-device_token = None
+# Persisted to disk because it is only ever sent by the app at startup: kept
+# in memory alone, every server restart would silently disable notifications
+# until the app happened to be opened again.
+TOKEN_FILE = Path(__file__).with_name("device_token.json")
 device_token_lock = threading.Lock()
+
+
+def _load_device_token():
+    try:
+        return json.loads(TOKEN_FILE.read_text())["token"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+device_token = _load_device_token()
+
+
+def require_api_key(view):
+    """Reject any request that does not carry the shared secret.
+
+    hmac.compare_digest instead of == because a plain string comparison
+    returns as soon as two bytes differ, and that timing difference can leak
+    the key one character at a time to an attacker who can measure it.
+    """
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        presented = request.headers.get("X-API-Key", "")
+        if not hmac.compare_digest(presented, API_KEY):
+            return jsonify({"error": "Unauthorized"}), 401
+        return view(*args, **kwargs)
+
+    return wrapper
 
 # Fraction of the frame that must be "moving" (per background subtraction)
 # before YOLO runs on it. Running YOLO on every single frame would be far
@@ -301,6 +353,7 @@ def generate_frames():
 
 
 @app.route("/status")
+@require_api_key
 def status():
     if not camera_stream.running:
         return jsonify(ok=False, error="Camera is off", state="off")
@@ -312,6 +365,7 @@ def status():
 
 
 @app.route("/video_feed")
+@require_api_key
 def video_feed():
     return Response(
         generate_frames(),
@@ -319,17 +373,20 @@ def video_feed():
     )
 
 @app.route('/api/camera/on', methods=['POST'])
+@require_api_key
 def camera_on():
     if camera_stream.start():
         return jsonify({"status": "on", "source": str(camera_stream.active_source)}), 200
     return jsonify({"status": "error", "error": camera_stream.error}), 500
 
 @app.route('/api/camera/off', methods=['POST'])
+@require_api_key
 def camera_off():
     camera_stream.stop()
     return jsonify({"status": "off"}), 200
 
 @app.route('/api/register_token', methods=['POST'])
+@require_api_key
 def register_token():
     global device_token
     data = request.get_json(silent=True) or {}
@@ -338,13 +395,48 @@ def register_token():
         return jsonify({"error": "Missing 'token' field"}), 400
     with device_token_lock:
         device_token = token
+        try:
+            TOKEN_FILE.write_text(json.dumps({"token": token}))
+        except OSError as e:
+            # Registration still succeeded in memory; only persistence failed.
+            print(f"Could not persist device token: {e}")
     return jsonify({"status": "registered"}), 200
 
+def resolve_bind_host():
+    """Pick the address to listen on.
+
+    Binding 0.0.0.0 would accept connections from every interface, including
+    the home Wi-Fi: anyone on the LAN could open /video_feed. Binding the
+    Tailscale address instead means the kernel never accepts a LAN packet for
+    this port at all - there is simply nothing listening there.
+
+    CAMERA_HOST overrides the autodetection (use 0.0.0.0 only to debug).
+    """
+    override = os.environ.get("CAMERA_HOST")
+    if override:
+        return override
+    try:
+        out = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5
+        )
+        host = out.stdout.strip().splitlines()[0].strip()
+        if host:
+            return host
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    raise SystemExit(
+        "Could not determine the Tailscale address (is tailscaled running?).\n"
+        "Start Tailscale, or set CAMERA_HOST explicitly."
+    )
+
+
 if __name__ == "__main__":
+    bind_host = resolve_bind_host()
+    print(f"Listening on http://{bind_host}:5000 (Tailscale only)")
     try:
         # threaded=True so the page load and the long-lived stream request
         # are served concurrently. debug=False avoids the reloader opening
         # the camera twice.
-        app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+        app.run(host=bind_host, port=5000, debug=False, threaded=True)
     finally:
         camera_stream.stop()

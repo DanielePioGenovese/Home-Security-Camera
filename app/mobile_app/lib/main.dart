@@ -15,13 +15,26 @@ void main() async {
 }
 
 class ApiService {
-  final String baseUrl = "http://192.168.178.69:5000";
+  /// Address of the camera server. Injected at build time so no private
+  /// network address is committed to source control:
+  ///   `flutter build apk --dart-define=CAMERA_BASE_URL=http://HOST:5000`
+  final String baseUrl = const String.fromEnvironment(
+    'CAMERA_BASE_URL',
+    defaultValue: 'http://127.0.0.1:5000',
+  );
 
   static const _timeout = Duration(seconds: 10);
 
+  /// Shared secret the server requires on every request. Injected at build
+  /// time (`flutter build apk --dart-define=CAMERA_API_KEY=...`) so it is
+  /// never committed to source control.
+  static const _apiKey = String.fromEnvironment('CAMERA_API_KEY');
+
+  Map<String, String> get authHeaders => {'X-API-Key': _apiKey};
+
   Future<void> turnOnCamera() async {
     final response = await http
-        .post(Uri.parse('$baseUrl/api/camera/on'))
+        .post(Uri.parse('$baseUrl/api/camera/on'), headers: authHeaders)
         .timeout(_timeout);
     if (response.statusCode != 200) {
       throw Exception('Error loading camera');
@@ -30,7 +43,7 @@ class ApiService {
 
   Future<void> turnOffCamera() async {
     final response = await http
-        .post(Uri.parse('$baseUrl/api/camera/off'))
+        .post(Uri.parse('$baseUrl/api/camera/off'), headers: authHeaders)
         .timeout(_timeout);
     if (response.statusCode != 200) {
       throw Exception('Error turning off camera');
@@ -41,7 +54,7 @@ class ApiService {
     await http
         .post(
           Uri.parse('$baseUrl/api/register_token'),
-          headers: {'Content-Type': 'application/json'},
+          headers: {...authHeaders, 'Content-Type': 'application/json'},
           body: jsonEncode({'token': token}),
         )
         .timeout(_timeout);
@@ -50,10 +63,12 @@ class ApiService {
   Future<String> cameraStatus() async {
 
     final response = await http
-    .get(
-      Uri.parse('$baseUrl/status'),
-    )
-    .timeout(_timeout);
+        .get(Uri.parse('$baseUrl/status'), headers: authHeaders)
+        .timeout(_timeout);
+
+    if (response.statusCode == 401) {
+      throw Exception('Rejected by the server: wrong or missing API key');
+    }
 
     String camStatus = json.decode(response.body)['state'];
 
@@ -67,9 +82,14 @@ class ApiService {
 /// byte stream for JPEG start/end markers (FFD8...FFD9), since Flutter's
 /// Image widget has no built-in support for this content type.
 class MjpegView extends StatefulWidget {
-  const MjpegView({super.key, required this.streamUrl});
+  const MjpegView({
+    super.key,
+    required this.streamUrl,
+    this.headers = const {},
+  });
 
   final String streamUrl;
+  final Map<String, String> headers;
 
   @override
   State<MjpegView> createState() => _MjpegViewState();
@@ -103,7 +123,8 @@ class _MjpegViewState extends State<MjpegView> {
   Future<void> _connect() async {
     _client = http.Client();
     try {
-      final request = http.Request('GET', Uri.parse(widget.streamUrl));
+      final request = http.Request('GET', Uri.parse(widget.streamUrl))
+        ..headers.addAll(widget.headers);
       final response = await _client!.send(request);
       if (response.statusCode != 200) {
         throw Exception('Stream unavailable (${response.statusCode})');
@@ -374,7 +395,10 @@ class _CameraHomePageState extends State<CameraHomePage> {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: _isOn
-                    ? MjpegView(streamUrl: '${_apiService.baseUrl}/video_feed')
+                    ? MjpegView(
+                        streamUrl: '${_apiService.baseUrl}/video_feed',
+                        headers: _apiService.authHeaders,
+                      )
                     : const Center(
                         child: Text(
                           'Streaming off',
