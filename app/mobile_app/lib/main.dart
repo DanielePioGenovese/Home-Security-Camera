@@ -174,6 +174,7 @@ class _MjpegViewState extends State<MjpegView> {
   }
 }
 
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -198,6 +199,7 @@ class CameraHomePage extends StatefulWidget {
   @override
   State<CameraHomePage> createState() => _CameraHomePageState();
 }
+
 
 class _CameraHomePageState extends State<CameraHomePage> {
   bool _isOn = false;

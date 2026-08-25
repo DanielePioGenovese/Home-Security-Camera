@@ -87,7 +87,7 @@
     },
     {
       "name": "flutter_launcher_icons",
-      "version": "0.13.1",
+      "version": "0.14.4",
       "dependencies": [
         "args",
         "checked_yaml",

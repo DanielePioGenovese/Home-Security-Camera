@@ -194,9 +194,16 @@ class CameraStream:
         try:
             while self.running:
                 success, frame = capture.read()
-                if not success or frame is None:
-                    time.sleep(0.01)
+
+                if not self.running or self.error:
+                    return  # camera off or failed; /status explains why on the page
+
+                if frame is None:
+                    time.sleep(0.005)  # no new frame yet, wait briefly
                     continue
+
+                frame = annotate_with_yolo(frame)
+
                 with self.lock:
                     self.latest_frame = frame
                     self.frame_id += 1
@@ -277,8 +284,6 @@ def generate_frames():
         if frame is None:
             time.sleep(0.005)  # no new frame yet, wait briefly
             continue
-
-        frame = annotate_with_yolo(frame)
 
         ok, buffer = cv2.imencode(".jpg", frame, encode_params)
         if not ok:

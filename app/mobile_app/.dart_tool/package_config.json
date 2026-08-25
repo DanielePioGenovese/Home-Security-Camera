@@ -129,9 +129,9 @@
     },
     {
       "name": "flutter_launcher_icons",
-      "rootUri": "file:///home/danielegenovese/.pub-cache/hosted/pub.dev/flutter_launcher_icons-0.13.1",
+      "rootUri": "file:///home/danielegenovese/.pub-cache/hosted/pub.dev/flutter_launcher_icons-0.14.4",
       "packageUri": "lib/",
-      "languageVersion": "2.18"
+      "languageVersion": "3.0"
     },
     {
       "name": "flutter_lints",
