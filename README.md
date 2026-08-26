@@ -7,8 +7,9 @@ front of the camera — even when the app is closed and you are not at home.
 No cloud video storage, no third-party camera service, no open port on your router.
 The video never leaves your own machine unless you ask for it.
 
-<!-- Demo video / GIF goes here -->
-<!-- ![Demo](docs/demo.gif) -->
+<p align="center">
+  <img src="docs/demo.gif" alt="Person detected -> push notification on the phone" width="320">
+</p>
 
 ```
 ┌──────────────┐   detects a person    ┌──────────────┐   push     ┌──────────┐
