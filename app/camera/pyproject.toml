@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Home surveillance server: person detection, MJPEG streaming, FCM push"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
 
 # Mirrors the PEP 723 block at the top of camera.py, which is what
 # `uv run camera.py` actually resolves. These are declared here too so that

@@ -393,5 +393,4 @@ app/
 
 ## License
 
-Not yet licensed. Until a LICENSE file is added, default copyright applies and
-the code is source-available rather than open source.
+[MIT](LICENSE). Do what you want with it, keep the copyright notice, no warranty.
