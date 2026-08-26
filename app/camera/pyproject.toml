@@ -1,12 +1,23 @@
 [project]
 name = "camera"
 version = "0.1.0"
-description = "Add your description here"
+description = "Home surveillance server: person detection, MJPEG streaming, FCM push"
 readme = "README.md"
 requires-python = ">=3.11"
+
+# Mirrors the PEP 723 block at the top of camera.py, which is what
+# `uv run camera.py` actually resolves. These are declared here too so that
+# `uv sync` produces an environment where ruff, mypy and the editor can
+# resolve cv2, flask, ultralytics and firebase_admin. Keep the two in sync.
 dependencies = [
     "flask>=3.1.3",
+    "opencv-python>=4.10",
+    "ultralytics>=8.3",
+    "firebase-admin>=6.5",
+]
+
+[dependency-groups]
+dev = [
     "mypy>=2.3.1",
-    "opencv-camera>=2023.1.7",
     "ruff>=0.16.4",
 ]

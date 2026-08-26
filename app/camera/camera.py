@@ -223,7 +223,8 @@ class CameraStream:
                 return capture
             self.error = (
                 f"Camera {self.requested_source!r} could not be opened or returns no frames. "
-                "Set CAMERA_SOURCE to None to auto-detect, or run scan_cameras.py."
+                "Set CAMERA_SOURCE to None to auto-detect, or list the real devices "
+                "with: v4l2-ctl --list-devices"
             )
             return None
 

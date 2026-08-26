@@ -248,3 +248,4 @@ app/camera/firebase-service-account.json
 app/mobile_app/android/app/google-services.json
 # Persisted FCM registration token (device-specific, not source)
 app/camera/device_token.json
+notes.txt

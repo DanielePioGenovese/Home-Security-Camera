@@ -143,25 +143,39 @@ class _MjpegViewState extends State<MjpegView> {
   void _onChunk(List<int> chunk) {
     _buffer.addAll(chunk);
 
+    // A single network chunk can contain several complete JPEG frames
+    // (e.g. after a brief stall on the phone's side). Decoding and
+    // rendering every one of them would make the UI fall further and
+    // further behind live video, which is the exact lag this stream is
+    // built to avoid server-side. So extract all complete frames but only
+    // keep the newest: older ones in the same chunk are simply discarded.
+    Uint8List? latestFrame;
+    var consumed = 0;
+
     while (true) {
-      final start = _indexOfMarker(_buffer, _soi, 0);
+      final start = _indexOfMarker(_buffer, _soi, consumed);
       if (start == -1) {
-        // No frame start found yet; avoid unbounded growth on junk data.
-        if (_buffer.length > 2000000) _buffer.clear();
+        consumed = _buffer.length > 2 ? _buffer.length - 1 : consumed;
         break;
       }
       final end = _indexOfMarker(_buffer, _eoi, start + 2);
       if (end == -1) break;
 
-      final frame = Uint8List.fromList(_buffer.sublist(start, end + 2));
-      _buffer.removeRange(0, end + 2);
+      latestFrame = Uint8List.fromList(_buffer.sublist(start, end + 2));
+      consumed = end + 2;
+    }
 
-      if (mounted) {
-        setState(() {
-          _currentFrame = frame;
-          _error = null;
-        });
-      }
+    if (consumed > 0) {
+      _buffer.removeRange(0, consumed);
+      // Avoid unbounded growth on junk data with no markers at all.
+      if (_buffer.length > 2000000) _buffer.clear();
+    }
+
+    if (latestFrame != null && mounted) {
+      setState(() {
+        _currentFrame = latestFrame;
+        _error = null;
+      });
     }
   }
 
@@ -241,6 +255,15 @@ class _CameraHomePageState extends State<CameraHomePage> {
   bool _isOn = false;
   bool _isLoading = false;
   bool _personDetected = false;
+
+  // Whether Android will actually display an alert. null until checked.
+  // A surveillance app that cannot notify is broken, so this is surfaced in
+  // the UI instead of being discovered the night it matters.
+  bool? _notificationsEnabled;
+
+  // Set when a show() call throws, e.g. a missing icon resource. Without
+  // this the exception is swallowed by the unawaited call in onMessage.
+  String? _notificationError;
   final ApiService _apiService = ApiService();
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -263,10 +286,31 @@ class _CameraHomePageState extends State<CameraHomePage> {
     );
     // Android 13+ requires the permission at runtime, otherwise the
     // notification silently never shows up.
-    await _notifications
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
+    final android = _notifications.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    await android?.requestNotificationsPermission();
+
+    // Create the channel now rather than letting the first show() create it.
+    // Android drops any notification whose channel does not exist, and a
+    // notification arriving while the app is killed is rendered by Play
+    // Services - none of this code runs then, so the channel has to already
+    // be there. Channel settings are immutable after creation: changing the
+    // importance below has no effect until the app is reinstalled.
+    await android?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'camera_alerts',
+        'Camera alerts',
+        description: 'Alerts when a person is detected by the camera',
+        importance: Importance.high,
+      ),
+    );
+
+    // The request result only describes this one prompt: it is null when no
+    // prompt was shown, and stays true even if the user revokes the
+    // permission later from settings. Ask the system for the current state
+    // instead - that is the answer that matters.
+    final enabled = await android?.areNotificationsEnabled();
+    if (mounted) setState(() => _notificationsEnabled = enabled);
   }
 
   // Registers this phone with the server so it knows where to push
@@ -275,7 +319,11 @@ class _CameraHomePageState extends State<CameraHomePage> {
   // the server, so notifications keep working even when the app is
   // backgrounded or fully closed.
   Future<void> _initPushNotifications() async {
-    await FirebaseMessaging.instance.requestPermission();
+    final settings = await FirebaseMessaging.instance.requestPermission();
+    if (settings.authorizationStatus != AuthorizationStatus.authorized &&
+        mounted) {
+      setState(() => _notificationsEnabled = false);
+    }
 
     final token = await FirebaseMessaging.instance.getToken();
     if (token != null) {
@@ -312,20 +360,26 @@ class _CameraHomePageState extends State<CameraHomePage> {
   }
 
   Future<void> _showPersonNotification() async {
-    await _notifications.show(
-      id: 0,
-      title: 'Motion detected',
-      body: 'A person was detected in front of the camera',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'camera_alerts',
-          'Camera alerts',
-          icon: 'ic_notification',
-          priority: Priority.high,
-          importance: Importance.high,
+    try {
+      await _notifications.show(
+        id: 0,
+        title: 'Motion detected',
+        body: 'A person was detected in front of the camera',
+        notificationDetails: const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'camera_alerts',
+            'Camera alerts',
+            icon: 'ic_notification',
+            priority: Priority.high,
+            importance: Importance.high,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      // This runs from an unawaited call in the onMessage listener, so an
+      // uncaught error here would vanish without a trace.
+      if (mounted) setState(() => _notificationError = e.toString());
+    }
   }
 
   Future<void> _turnOn() async {
@@ -373,6 +427,38 @@ class _CameraHomePageState extends State<CameraHomePage> {
     super.dispose();
   }
 
+  /// Persistent banner shown when alerts cannot reach the user. Deliberately
+  /// not a SnackBar: this condition does not go away on its own, and a
+  /// warning that disappears after four seconds is a warning nobody reads.
+  Widget _buildNotificationWarning() {
+    final message = _notificationError ??
+        'Notifications are disabled. You will NOT be alerted when someone '
+            'is detected. Enable them in Settings > Apps > this app > '
+            'Notifications.';
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF7F1D1D),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.notifications_off, color: Colors.white, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -385,6 +471,8 @@ class _CameraHomePageState extends State<CameraHomePage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.start,
           children: [
+            if (_notificationsEnabled == false || _notificationError != null)
+              _buildNotificationWarning(),
             AspectRatio(
               aspectRatio: 4 / 3, // must match FRAME_WIDTH/FRAME_HEIGHT in camera.py
               child: Container(

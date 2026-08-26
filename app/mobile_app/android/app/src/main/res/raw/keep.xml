@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ic_notification is referenced only by name, as a string, from Dart. The
+  release build's resource shrinker analyses Java/Kotlin/XML and cannot see
+  that reference, so it strips the drawable and every notification then fails
+  with PlatformException(invalid_icon). This keeps it.
+-->
+<resources
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification" />

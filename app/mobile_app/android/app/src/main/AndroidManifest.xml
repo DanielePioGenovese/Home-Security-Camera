@@ -32,6 +32,14 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Used by Google Play Services to render notifications that arrive
+             while the app is killed, when no Dart code runs to style them. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="camera_alerts" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
